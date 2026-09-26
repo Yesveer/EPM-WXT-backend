@@ -24,15 +24,15 @@ type Machine struct {
 	OwnerID           primitive.ObjectID `bson:"owner_id" json:"owner_id"`
 	TenantID          string             `bson:"tenant_id" json:"tenant_id"`
 	OrgID             string             `bson:"org_id" json:"org_id"`
-	GroupIDs          []string           `bson:"group_ids" json:"group_ids"`             // Group IDs this machine belongs to
-	AllowedUsers      []string           `bson:"allowed_users" json:"allowed_users"`     // List of usernames allowed to access
+	GroupIDs          []string           `bson:"group_ids" json:"group_ids"`         // Group IDs this machine belongs to
+	AllowedUsers      []string           `bson:"allowed_users" json:"allowed_users"` // List of usernames allowed to access
 	ResourceStats     ResourceStats      `bson:"resource_stats" json:"resource_stats"`
-	Metadata           map[string]string  `bson:"metadata" json:"metadata"`
-	DeployApplication  bool               `bson:"deploy_application" json:"deploy_application"`
-	CustomScript       string             `bson:"custom_script,omitempty" json:"custom_script,omitempty"`
+	Metadata          map[string]string  `bson:"metadata" json:"metadata"`
+	DeployApplication bool               `bson:"deploy_application" json:"deploy_application"`
+	CustomScript      string             `bson:"custom_script,omitempty" json:"custom_script,omitempty"`
 
 	// Security fields
-	Revoked         bool       `bson:"revoked" json:"revoked"`                                   // True = all cert signing rejected + gRPC kicked
+	Revoked         bool       `bson:"revoked" json:"revoked"` // True = all cert signing rejected + gRPC kicked
 	RevokedAt       *time.Time `bson:"revoked_at,omitempty" json:"revoked_at,omitempty"`
 	CertFingerprint string     `bson:"cert_fingerprint,omitempty" json:"cert_fingerprint,omitempty"` // SHA-256 of last issued client cert
 
@@ -71,20 +71,27 @@ type AccessEvent struct {
 	Protocol    string             `bson:"protocol" json:"protocol"` // "ssh" | "rdp" | "console"
 	OSUser      string             `bson:"os_user" json:"os_user"`   // the OS account that logged in
 	SourceIP    string             `bson:"source_ip" json:"source_ip"`
-	Line        string             `bson:"line" json:"line"`       // tty/session id (dedup key with os_user)
-	Active      bool               `bson:"active" json:"active"`   // still logged in
+	Line        string             `bson:"line" json:"line"`     // tty/session id (dedup key with os_user)
+	Active      bool               `bson:"active" json:"active"` // still logged in
 	LoginAt     time.Time          `bson:"login_at" json:"login_at"`
 	LogoutAt    *time.Time         `bson:"logout_at,omitempty" json:"logout_at,omitempty"`
 	CreatedAt   time.Time          `bson:"created_at" json:"created_at"`
+}
+
+// AccessEventKey identifies one login session. The pair is what the agent uses
+// to deduplicate, so the backend matches on exactly the same thing.
+type AccessEventKey struct {
+	OSUser string
+	Line   string
 }
 
 type ResourceStats struct {
 	CPUPercent      float64 `bson:"cpu_percent" json:"cpu_percent"`
 	MemoryPercent   float64 `bson:"memory_percent" json:"memory_percent"`
 	DiskPercent     float64 `bson:"disk_percent" json:"disk_percent"`
-	NetworkInbound  float64 `bson:"network_inbound" json:"network_inbound"`    // MB/s
-	NetworkOutbound float64 `bson:"network_outbound" json:"network_outbound"`  // MB/s
-	Uptime          int64   `bson:"uptime_seconds" json:"uptime_seconds"`      // seconds
+	NetworkInbound  float64 `bson:"network_inbound" json:"network_inbound"`   // MB/s
+	NetworkOutbound float64 `bson:"network_outbound" json:"network_outbound"` // MB/s
+	Uptime          int64   `bson:"uptime_seconds" json:"uptime_seconds"`     // seconds
 }
 
 type LogEntry struct {
@@ -97,28 +104,28 @@ type LogEntry struct {
 	Output    string             `bson:"output,omitempty" json:"output,omitempty"` // Command output/response
 	Timestamp time.Time          `bson:"timestamp" json:"timestamp"`
 	Success   bool               `bson:"success" json:"success"`
-	Source    string             `bson:"source" json:"source"`       // "vscode", "cli", "ui"
-	Browser   string             `bson:"browser" json:"browser"`     // User agent / browser info
-	OSInfo    string             `bson:"os_info" json:"os_info"`     // Client OS info
+	Source    string             `bson:"source" json:"source"`         // "vscode", "cli", "ui"
+	Browser   string             `bson:"browser" json:"browser"`       // User agent / browser info
+	OSInfo    string             `bson:"os_info" json:"os_info"`       // Client OS info
 	IPAddress string             `bson:"ip_address" json:"ip_address"` // Client IP
 }
 
 // Session represents a terminal session
 type Session struct {
-	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	SessionID   string             `bson:"session_id" json:"session_id"`
-	MachineID   primitive.ObjectID `bson:"machine_id" json:"machine_id"`
-	AgentID     string             `bson:"agent_id" json:"agent_id"`
-	UserID      primitive.ObjectID `bson:"user_id" json:"user_id"`
-	Username    string             `bson:"username" json:"username"`
-	Source      string             `bson:"source" json:"source"`     // "vscode", "cli", "ui"
-	Browser     string             `bson:"browser" json:"browser"`   // User agent info
-	OSInfo      string             `bson:"os_info" json:"os_info"`   // Client OS
-	IPAddress   string             `bson:"ip_address" json:"ip_address"`
-	Status      string             `bson:"status" json:"status"`     // "active", "closed"
-	CommandCount int               `bson:"command_count" json:"command_count"`
-	CreatedAt   time.Time          `bson:"created_at" json:"created_at"`
-	ClosedAt    *time.Time         `bson:"closed_at,omitempty" json:"closed_at,omitempty"`
+	ID           primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	SessionID    string             `bson:"session_id" json:"session_id"`
+	MachineID    primitive.ObjectID `bson:"machine_id" json:"machine_id"`
+	AgentID      string             `bson:"agent_id" json:"agent_id"`
+	UserID       primitive.ObjectID `bson:"user_id" json:"user_id"`
+	Username     string             `bson:"username" json:"username"`
+	Source       string             `bson:"source" json:"source"`   // "vscode", "cli", "ui"
+	Browser      string             `bson:"browser" json:"browser"` // User agent info
+	OSInfo       string             `bson:"os_info" json:"os_info"` // Client OS
+	IPAddress    string             `bson:"ip_address" json:"ip_address"`
+	Status       string             `bson:"status" json:"status"` // "active", "closed"
+	CommandCount int                `bson:"command_count" json:"command_count"`
+	CreatedAt    time.Time          `bson:"created_at" json:"created_at"`
+	ClosedAt     *time.Time         `bson:"closed_at,omitempty" json:"closed_at,omitempty"`
 }
 
 type DashboardStats struct {
@@ -143,12 +150,12 @@ type AuditLog struct {
 	ActorID    string             `bson:"actor_id" json:"actor_id"`
 	ActorName  string             `bson:"actor_name" json:"actor_name"`
 	ActorRole  string             `bson:"actor_role" json:"actor_role"`
-	Action     string             `bson:"action" json:"action"`         // e.g. "user.create", "machine.delete"
-	Resource   string             `bson:"resource" json:"resource"`     // e.g. "user", "machine"
+	Action     string             `bson:"action" json:"action"`     // e.g. "user.create", "machine.delete"
+	Resource   string             `bson:"resource" json:"resource"` // e.g. "user", "machine"
 	ResourceID string             `bson:"resource_id" json:"resource_id"`
 	Details    map[string]any     `bson:"details,omitempty" json:"details,omitempty"`
 	IPAddress  string             `bson:"ip_address" json:"ip_address"`
-	Status     string             `bson:"status" json:"status"`         // "success", "failure"
+	Status     string             `bson:"status" json:"status"` // "success", "failure"
 	Timestamp  time.Time          `bson:"timestamp" json:"timestamp"`
 }
 
@@ -181,8 +188,8 @@ type Fix struct {
 // S3Config holds S3-compatible storage configuration per tenant
 type S3Config struct {
 	Enabled   bool   `bson:"enabled" json:"enabled"`
-	Endpoint  string `bson:"endpoint" json:"endpoint"`   // e.g. "s3.amazonaws.com" or "minio.host:9000"
-	Protocol  string `bson:"protocol" json:"protocol"`   // "http" or "https"
+	Endpoint  string `bson:"endpoint" json:"endpoint"` // e.g. "s3.amazonaws.com" or "minio.host:9000"
+	Protocol  string `bson:"protocol" json:"protocol"` // "http" or "https"
 	AccessKey string `bson:"access_key" json:"access_key"`
 	SecretKey string `bson:"secret_key" json:"secret_key"`
 	Bucket    string `bson:"bucket" json:"bucket"`
@@ -192,11 +199,11 @@ type S3Config struct {
 // LogManagementConfig holds global log retention and archival settings (single document, no tenantID).
 type LogManagementConfig struct {
 	ID               primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	RetentionDays    int                `bson:"retention_days" json:"retention_days"`       // 0 = never auto-delete
+	RetentionDays    int                `bson:"retention_days" json:"retention_days"` // 0 = never auto-delete
 	ArchiveEnabled   bool               `bson:"archive_enabled" json:"archive_enabled"`
 	ArchiveEveryDays int                `bson:"archive_every_days" json:"archive_every_days"` // 10, 20, 30
-	StorageType      string             `bson:"storage_type" json:"storage_type"`           // "s3","gcs","azure","sftp","nfs","elasticsearch","siem",""
-	StorageCredsEnc  []byte             `bson:"storage_creds_enc,omitempty" json:"-"`       // AES-GCM encrypted JSON
+	StorageType      string             `bson:"storage_type" json:"storage_type"`             // "s3","gcs","azure","sftp","nfs","elasticsearch","siem",""
+	StorageCredsEnc  []byte             `bson:"storage_creds_enc,omitempty" json:"-"`         // AES-GCM encrypted JSON
 	LastArchiveAt    *time.Time         `bson:"last_archive_at,omitempty" json:"last_archive_at,omitempty"`
 	NextArchiveAt    *time.Time         `bson:"next_archive_at,omitempty" json:"next_archive_at,omitempty"`
 	UpdatedAt        time.Time          `bson:"updated_at" json:"updated_at"`
@@ -207,9 +214,9 @@ type ArchiveRun struct {
 	ID               primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	StartedAt        time.Time          `bson:"started_at" json:"started_at"`
 	FinishedAt       *time.Time         `bson:"finished_at,omitempty" json:"finished_at,omitempty"`
-	Status           string             `bson:"status" json:"status"`           // "running","success","failed","partial"
+	Status           string             `bson:"status" json:"status"` // "running","success","failed","partial"
 	StorageType      string             `bson:"storage_type" json:"storage_type"`
-	Trigger          string             `bson:"trigger" json:"trigger"`         // "auto","manual"
+	Trigger          string             `bson:"trigger" json:"trigger"` // "auto","manual"
 	LogsArchived     int64              `bson:"logs_archived" json:"logs_archived"`
 	SessionsArchived int64              `bson:"sessions_archived" json:"sessions_archived"`
 	LogsDeleted      int64              `bson:"logs_deleted" json:"logs_deleted"`
@@ -272,8 +279,8 @@ type Store interface {
 	// Machine registration flow
 	CreatePendingMachine(machine *Machine) error
 	GetMachineByRegistrationToken(token string) (*Machine, error)
-	RevokeMachine(machineID primitive.ObjectID) error          // Marks revoked=true; blocks future sign-cert + gRPC
-	UpdateCertFingerprint(token, fingerprint string) error     // Stores SHA-256 of last issued agent cert
+	RevokeMachine(machineID primitive.ObjectID) error      // Marks revoked=true; blocks future sign-cert + gRPC
+	UpdateCertFingerprint(token, fingerprint string) error // Stores SHA-256 of last issued agent cert
 	GetMachineByName(name string, ownerID primitive.ObjectID) (*Machine, error)
 	ActivateMachine(token string, agentID string, osInfo string, ipAddress string, metadata map[string]string, initialStatus string) error
 
@@ -388,6 +395,9 @@ type Store interface {
 
 	// External access events (SSH/RDP intrusion tracking)
 	CreateAccessEvent(ev *AccessEvent) error
+	HasActiveAccessEvent(agentID, osUser, line string) (bool, error)
+	CloseStaleAccessEvents(agentID string, keep []AccessEventKey, at time.Time) (int64, error)
+	DedupeActiveAccessEvents(agentID string, at time.Time) (int64, error)
 	CloseAccessEvent(agentID, osUser, line string, logoutAt time.Time) error
 	GetActiveAccessEvents(machineID primitive.ObjectID) ([]*AccessEvent, error)
 	GetAccessEventsByMachine(machineID primitive.ObjectID, limit, skip int) ([]*AccessEvent, error)

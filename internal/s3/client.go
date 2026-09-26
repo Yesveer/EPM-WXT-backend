@@ -2,6 +2,7 @@ package s3
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -30,7 +31,7 @@ func NewClient(endpoint, protocol, accessKey, secretKey, region, bucket string) 
 	baseURL := fmt.Sprintf("%s://%s", protocol, endpoint)
 
 	cfg := aws.Config{
-		Region: region,
+		Region:      region,
 		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 	}
 
@@ -48,17 +49,53 @@ func NewClient(endpoint, protocol, accessKey, secretKey, region, bucket string) 
 
 // Upload puts an object into S3 and returns the key.
 func (c *Client) Upload(ctx context.Context, key string, data []byte, contentType string) error {
+	return c.upload(ctx, key, data, contentType, "")
+}
+
+// UploadGzipped stores data compressed, tagged so that clients transparently
+// decompress it.
+//
+// Session recordings are Guacamole protocol streams: long runs of repetitive
+// text instructions wrapping base64 image data, which compress well. Setting
+// Content-Encoding means a browser fetching the object through a presigned URL
+// inflates it itself, so the player needs no change and still receives the raw
+// stream it expects.
+func (c *Client) UploadGzipped(ctx context.Context, key string, data []byte, contentType string) (int, error) {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return 0, fmt.Errorf("gzip writer: %w", err)
+	}
+	if _, err := zw.Write(data); err != nil {
+		return 0, fmt.Errorf("gzip write: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return 0, fmt.Errorf("gzip close: %w", err)
+	}
+
+	if err := c.upload(ctx, key, buf.Bytes(), contentType, "gzip"); err != nil {
+		return 0, err
+	}
+	return buf.Len(), nil
+}
+
+func (c *Client) upload(ctx context.Context, key string, data []byte, contentType, contentEncoding string) error {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	_, err := c.s3Client.PutObject(ctx, &s3.PutObjectInput{
+	in := &s3.PutObjectInput{
 		Bucket:      aws.String(c.bucket),
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(data),
 		ContentType: aws.String(contentType),
 		ACL:         types.ObjectCannedACLPrivate,
-	})
+	}
+	if contentEncoding != "" {
+		in.ContentEncoding = aws.String(contentEncoding)
+	}
+
+	_, err := c.s3Client.PutObject(ctx, in)
 	return err
 }
 

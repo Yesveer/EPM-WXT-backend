@@ -45,7 +45,7 @@ type TerminalSession struct {
 	castEvents    []CastEvent             // Timed output events for asciicast v2 recording
 	outputDirty   bool                    // True when buffer has new data not yet flushed to DB
 	lastLogID     *primitive.ObjectID     // ID of the last logged command entry
-	done          chan struct{}            // Closed when session ends, stops background goroutines
+	done          chan struct{}           // Closed when session ends, stops background goroutines
 	tabPressed    bool                    // True when last keystroke was Tab; next PTY output is the completion suffix
 	mu            sync.Mutex
 }

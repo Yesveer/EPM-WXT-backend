@@ -24,8 +24,8 @@ import (
 	"github.com/vsay/vsay-agent-backend/internal/ca"
 	"github.com/vsay/vsay-agent-backend/internal/grpc"
 	logmgr "github.com/vsay/vsay-agent-backend/internal/logmanager"
-	agentmiddleware "github.com/vsay/vsay-agent-backend/internal/middleware"
 	"github.com/vsay/vsay-agent-backend/internal/metrics"
+	agentmiddleware "github.com/vsay/vsay-agent-backend/internal/middleware"
 	"github.com/vsay/vsay-agent-backend/internal/reconciler"
 	"github.com/vsay/vsay-agent-backend/internal/store"
 	"github.com/vsay/vsay-agent-backend/internal/upload"
@@ -179,6 +179,12 @@ func main() {
 	rdpManager := api.NewRDPManager(agentManager, st, logger)
 	h.SetRDPManager(rdpManager)
 
+	// Remote control (AnyDesk-style): the admin joins the user's LIVE desktop
+	// session instead of opening a new one. It reuses the RDP manager's tunnel
+	// and guacd plumbing; only the orchestration differs.
+	rcManager := api.NewRemoteControlManager(agentManager, st, rdpManager, logger)
+	h.SetRemoteControlManager(rcManager)
+
 	// gRPC Server — intentionally public: this is the port agents dial in on.
 	lis, err := net.Listen("tcp", ":8081") // #nosec G102 -- deliberately public agent-facing port
 	if err != nil {
@@ -192,6 +198,7 @@ func main() {
 	agentServer := grpc.NewAgentServer(st, agentManager, logger)
 	agentServer.SetTerminalManager(h.GetTerminalManager()) // Wire terminal manager
 	agentServer.SetRDPHandler(rdpManager)                  // Route rdp_ session output to RDP tunnels
+	agentServer.SetRemoteControlHandler(rcManager)         // Route rc_ session output to remote control
 	agentv1.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// HTTP Server
@@ -353,6 +360,13 @@ func main() {
 		auth.GET("/machines/:agent_id/rdp/file", h.RDPFile)
 		// Live remote-desktop sessions on a machine
 		auth.GET("/machines/:agent_id/desktop/sessions", h.DesktopSessions)
+
+		// Remote control — the admin joins the user's live session, with the
+		// user's consent, and the whole session is recorded.
+		auth.POST("/machines/:agent_id/remote-control/start", h.StartRemoteControl)
+		auth.GET("/machines/:agent_id/remote-control/status", h.RemoteControlStatus)
+		auth.POST("/machines/:agent_id/remote-control/stop", h.StopRemoteControl)
+		auth.GET("/machines/:agent_id/remote-control/ws", h.RemoteControlWebSocket)
 		// External SSH/RDP access history + active sessions
 		auth.GET("/machines/:agent_id/access-events", h.GetAccessEvents)
 		// Dashboard routes

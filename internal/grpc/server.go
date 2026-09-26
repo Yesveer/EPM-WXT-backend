@@ -25,6 +25,7 @@ type AgentServer struct {
 	logger          *zap.Logger
 	terminalManager TerminalManager
 	rdpHandler      RDPDataHandler
+	rcHandler       RDPDataHandler
 	email           *email.Service
 }
 
@@ -91,6 +92,93 @@ func (s *AgentServer) handleAgentStats(agentID, raw string) {
 
 // handleAccessEvent records an external SSH/RDP login/logout the agent detected, and
 // on a new login alerts the machine's notify-emails. Best-effort.
+// accessSnapshotMsg is the full session list the agent sends on start, in a
+// StatusUpdate("__access_snapshot__").
+type accessSnapshotMsg struct {
+	Sessions []struct {
+		Protocol  string `json:"protocol"`
+		OSUser    string `json:"os_user"`
+		SourceIP  string `json:"source_ip"`
+		Line      string `json:"line"`
+		Timestamp string `json:"timestamp"`
+	} `json:"sessions"`
+}
+
+// handleAccessSnapshot reconciles the recorded sessions against what the
+// machine actually has open.
+//
+// Two problems only a snapshot can fix. Sessions that ended while the agent
+// was stopped are never reported as logouts — nothing saw them end — so they
+// stayed "active" indefinitely. And sessions that were already recorded got
+// inserted again on every restart. Reconciling handles both: close what is
+// gone, add what is new, leave the rest alone.
+func (s *AgentServer) handleAccessSnapshot(agentID, raw string) {
+	var snap accessSnapshotMsg
+	if err := json.Unmarshal([]byte(raw), &snap); err != nil {
+		s.logger.Warn("access snapshot: bad payload", zap.String("agent_id", agentID), zap.Error(err))
+		return
+	}
+
+	machine, err := s.store.GetMachineByAgentID(agentID)
+	if err != nil || machine == nil {
+		return
+	}
+
+	keep := make([]store.AccessEventKey, 0, len(snap.Sessions))
+	for _, sess := range snap.Sessions {
+		keep = append(keep, store.AccessEventKey{OSUser: sess.OSUser, Line: sess.Line})
+	}
+
+	now := time.Now()
+	closed, err := s.store.CloseStaleAccessEvents(agentID, keep, now)
+	if err != nil {
+		s.logger.Warn("access snapshot: closing stale sessions failed", zap.Error(err))
+	}
+
+	// Collapse rows left over from before insert was deduplicated. Reconciling
+	// alone would keep them: each one matches a session that genuinely is open.
+	deduped, err := s.store.DedupeActiveAccessEvents(agentID, now)
+	if err != nil {
+		s.logger.Warn("access snapshot: dedupe failed", zap.Error(err))
+	}
+
+	added := 0
+	for _, sess := range snap.Sessions {
+		open, err := s.store.HasActiveAccessEvent(agentID, sess.OSUser, sess.Line)
+		if err != nil || open {
+			continue
+		}
+		ts, perr := time.Parse(time.RFC3339, sess.Timestamp)
+		if perr != nil {
+			ts = time.Now()
+		}
+		rec := &store.AccessEvent{
+			MachineID:   machine.ID,
+			AgentID:     agentID,
+			MachineName: machine.Name,
+			TenantID:    machine.TenantID,
+			Protocol:    sess.Protocol,
+			OSUser:      sess.OSUser,
+			SourceIP:    sess.SourceIP,
+			Line:        sess.Line,
+			Active:      true,
+			LoginAt:     ts,
+		}
+		if err := s.store.CreateAccessEvent(rec); err != nil {
+			s.logger.Warn("access snapshot: store failed", zap.Error(err))
+			continue
+		}
+		added++
+	}
+
+	s.logger.Info("Reconciled external login sessions",
+		zap.String("machine", machine.Name),
+		zap.Int("reported", len(snap.Sessions)),
+		zap.Int("added", added),
+		zap.Int64("closed_stale", closed),
+		zap.Int64("deduped", deduped))
+}
+
 func (s *AgentServer) handleAccessEvent(agentID, raw string) {
 	var ev accessEventMsg
 	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
@@ -116,7 +204,15 @@ func (s *AgentServer) handleAccessEvent(agentID, raw string) {
 		return
 	}
 
-	// login
+	// login — idempotent.
+	//
+	// The agent re-reports every existing session on start, so without this an
+	// unchanged login gained a fresh row on every agent restart and the portal
+	// showed the same person logged in several times over.
+	if open, err := s.store.HasActiveAccessEvent(agentID, ev.OSUser, ev.Line); err == nil && open {
+		return
+	}
+
 	rec := &store.AccessEvent{
 		MachineID:   machine.ID,
 		AgentID:     agentID,
@@ -152,6 +248,14 @@ func (s *AgentServer) handleAccessEvent(agentID, raw string) {
 // SetRDPHandler wires the RDP tunnel manager so "rdp_" session output is routed to it.
 func (s *AgentServer) SetRDPHandler(h RDPDataHandler) {
 	s.rdpHandler = h
+}
+
+// SetRemoteControlHandler wires the remote-control manager so "rc_" session
+// output — the consent/state replies from the agent — is routed to it. It
+// reuses RDPDataHandler because the shape is identical: a session id and a
+// blob of bytes.
+func (s *AgentServer) SetRemoteControlHandler(h RDPDataHandler) {
+	s.rcHandler = h
 }
 
 func (s *AgentServer) Register(ctx context.Context, req *agentv1.RegisterRequest) (*agentv1.RegisterResponse, error) {
@@ -359,7 +463,8 @@ func (s *AgentServer) Stream(stream agentv1.AgentService_StreamServer) error {
 				statusVal := payload.Status.Status
 				// Access events and agent-stats have their own handlers — don't dump the
 				// raw status JSON for them (agent stats especially would flood the log).
-				if statusVal != "__access_event__" && statusVal != "__agent_stats__" {
+				if statusVal != "__access_event__" && statusVal != "__agent_stats__" &&
+					statusVal != "__access_snapshot__" {
 					s.logger.Info("Agent status update",
 						zap.String("agent_id", agentID),
 						zap.String("status", statusVal),
@@ -375,6 +480,11 @@ func (s *AgentServer) Stream(stream agentv1.AgentService_StreamServer) error {
 				if statusVal == "__access_event__" {
 					go s.handleAccessEvent(agentID, payload.Status.Message)
 				}
+				// Full session list, sent once when the agent starts, so
+				// sessions that ended while it was down get closed.
+				if statusVal == "__access_snapshot__" {
+					go s.handleAccessSnapshot(agentID, payload.Status.Message)
+				}
 				// Agent process resource usage (for Agent Monitoring).
 				if statusVal == "__agent_stats__" {
 					go s.handleAgentStats(agentID, payload.Status.Message)
@@ -382,7 +492,10 @@ func (s *AgentServer) Stream(stream agentv1.AgentService_StreamServer) error {
 			case *agentv1.AgentMessage_TerminalOutput:
 				// RDP tunnel sessions ("rdp_") carry port-forward data for the
 				// remote-desktop bridge, not terminal output — route them there.
-				if s.rdpHandler != nil && strings.HasPrefix(payload.TerminalOutput.SessionId, "rdp_") {
+				if s.rcHandler != nil && strings.HasPrefix(payload.TerminalOutput.SessionId, "rc_") {
+					// Remote-control control channel: consent and state replies.
+					s.rcHandler.HandleAgentData(payload.TerminalOutput.SessionId, payload.TerminalOutput.Data)
+				} else if s.rdpHandler != nil && strings.HasPrefix(payload.TerminalOutput.SessionId, "rdp_") {
 					s.rdpHandler.HandleAgentData(payload.TerminalOutput.SessionId, payload.TerminalOutput.Data)
 					continue
 				}

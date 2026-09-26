@@ -1,12 +1,12 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"context"
 	"net"
 	"net/http"
 	"os"
@@ -55,11 +55,16 @@ type rdpTunnel struct {
 	sessionID    string
 	connectionID string
 	agentID      string
-	username     string    // account/portal user this session connected as
-	protocol     string    // "rdp" or "vnc"
-	startedAt    time.Time // when the tunnel opened
-	listener     net.Listener
-	guacdConn    net.Conn
+	username     string // account/portal user this session connected as
+	protocol     string // "rdp" or "vnc"
+	// label is the session id the PORTAL shows — the remote-control session
+	// ("rc_...") rather than this tunnel's internal one. Recordings are filed
+	// under it so that an audit-log entry and its recording can be matched;
+	// filing them under the tunnel id made that impossible.
+	label     string
+	startedAt time.Time // when the tunnel opened
+	listener  net.Listener
+	guacdConn net.Conn
 	// pending buffers agent→guacd bytes that arrive BEFORE guacd connects to the
 	// bridge. VNC/RDP servers speak first (e.g. the "RFB 003.008\n" version), so the
 	// target's opening bytes often arrive before guacd is attached — without this
@@ -152,10 +157,14 @@ func (m *RDPManager) HandleAgentData(sessionID string, data []byte) {
 			t.pending = append(t.pending, raw)
 		}
 		t.connMu.Unlock()
-	case "port_closed", "port_error":
-		m.logger.Warn("RDP tunnel: agent closed the target connection",
+	case "port_closed":
+		m.logger.Info("Tunnel closed by the agent",
 			zap.String("session", sessionID),
-			zap.String("reason", msg.Type),
+			zap.Int64("bytes_agent_to_guacd", atomic.LoadInt64(&t.fromAgent)))
+		t.close()
+	case "port_error":
+		m.logger.Warn("Tunnel failed on the agent side",
+			zap.String("session", sessionID),
 			zap.String("err", msg.Error),
 			zap.Int64("bytes_agent_to_guacd", atomic.LoadInt64(&t.fromAgent)))
 		t.close()
@@ -303,7 +312,11 @@ func (t *rdpTunnel) close() {
 
 		// Encode + upload the session recording (best-effort, off the hot path).
 		if t.mgr.recordingEnabled {
-			go t.mgr.encodeAndUpload(t.sessionID, t.agentID, t.username, t.startedAt)
+			label := t.label
+			if label == "" {
+				label = t.sessionID
+			}
+			go t.mgr.encodeAndUpload(t.sessionID, label, t.agentID, t.username, t.startedAt)
 		}
 	})
 }
@@ -315,7 +328,9 @@ func (t *rdpTunnel) close() {
 // Pipeline: guacenc (inside the guacd container) → docker cp the .m4v to a temp file →
 // upload to the tenant's S3 → CreateRecording. Requires the `docker` CLI on the host
 // and guacenc in the guacd image (it ships with guacamole/guacd).
-func (m *RDPManager) encodeAndUpload(sessionID, agentID, username string, startedAt time.Time) {
+// encodeAndUpload reads the recording guacd wrote for tunnel sessionID and
+// stores it under label — the session id the portal knows this by.
+func (m *RDPManager) encodeAndUpload(sessionID, label, agentID, username string, startedAt time.Time) {
 	log := m.logger.With(zap.String("session", sessionID))
 
 	// Give guacd a moment to finish flushing/closing the recording file.
@@ -386,17 +401,22 @@ func (m *RDPManager) encodeAndUpload(sessionID, agentID, username string, starte
 	}
 
 	// .guac extension → the portal plays it with the Guacamole SessionRecording player.
-	key := fmt.Sprintf("webxterm/%s/%s/%s/%s/videos/desktop.guac",
-		machine.TenantID, machine.Name, sessionID, username)
+	key := recordingKey(machine, username, label)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := client.Upload(ctx, key, data, "application/octet-stream"); err != nil {
+	stored, err := client.UploadGzipped(ctx, key, data, "application/octet-stream")
+	if err != nil {
 		log.Warn("recording: S3 upload failed", zap.String("key", key), zap.Error(err))
 		return
 	}
+	log.Info("recording: uploaded",
+		zap.String("key", key),
+		zap.Int("raw_bytes", len(data)),
+		zap.Int("stored_bytes", stored),
+		zap.Float64("ratio", float64(len(data))/float64(max(stored, 1))))
 
 	rec := &store.SessionRecording{
-		SessionID:   sessionID,
+		SessionID:   label,
 		MachineID:   machine.ID,
 		MachineName: machine.Name,
 		TenantID:    machine.TenantID,
@@ -409,7 +429,6 @@ func (m *RDPManager) encodeAndUpload(sessionID, agentID, username string, starte
 		log.Warn("recording: save metadata failed", zap.Error(err))
 		return
 	}
-	log.Info("Desktop session recording uploaded to S3", zap.String("key", key), zap.Int("bytes", len(data)))
 }
 
 func (m *RDPManager) sendToAgent(agentID, sessionID string, msg portMsg) error {
@@ -474,13 +493,13 @@ func (m *RDPManager) connectTunnel(agentID, protocol, username, password, domain
 			// breaks GFX → black screen) and we keep WDDM enabled on the Windows side.
 			// display-update resizes in-session (no reconnect churn / "disconnected by
 			// other connection").
-			"color-depth":              "32",
-			"resize-method":            "display-update",
-			"enable-wallpaper":         "false",
-			"enable-theming":           "false",
-			"enable-font-smoothing":    "true",
-			"enable-full-window-drag":  "false",
-			"enable-menu-animations":   "false",
+			"color-depth":             "32",
+			"resize-method":           "display-update",
+			"enable-wallpaper":        "false",
+			"enable-theming":          "false",
+			"enable-font-smoothing":   "true",
+			"enable-full-window-drag": "false",
+			"enable-menu-animations":  "false",
 		}
 		if domain != "" {
 			config.Parameters["domain"] = domain
@@ -526,6 +545,150 @@ func (m *RDPManager) connectTunnel(agentID, protocol, username, password, domain
 		zap.String("session", t.sessionID),
 		zap.Int("bridge_port", t.port()))
 	return guac.NewSimpleTunnel(stream), nil
+}
+
+// connectVNCTunnel points guacd at an RFB server the agent is running on a
+// DYNAMIC loopback port, for the remote-control feature.
+//
+// connectTunnel assumes a fixed well-known port (3389 for RDP, 5900 for a
+// pre-installed VNC service). The agent's own RFB server instead binds an
+// ephemeral port chosen after the user consents, so the port has to be passed
+// in. Everything downstream — the bridge, guacd, recording — is identical.
+func (m *RDPManager) connectVNCTunnel(agentID, label string, remotePort int, username, password, width, height string) (guac.Tunnel, error) {
+	// One session at a time: a second viewer on somebody's live desktop is
+	// exactly the surprise the consent prompt exists to prevent.
+	t, err := m.openTunnel(agentID, remotePort, 1)
+	if err != nil {
+		return nil, err
+	}
+	t.username = username
+	t.protocol = "vnc"
+	t.label = label
+
+	config := guac.NewGuacamoleConfiguration()
+	config.Protocol = "vnc"
+	config.Parameters = map[string]string{
+		"hostname": m.hostGateway,
+		"port":     strconv.Itoa(t.port()),
+		"password": password,
+		// The agent composites the cursor into the frame itself, so guacd must
+		// not also draw a local one or the user sees two pointers.
+		"cursor": "remote",
+		// Clipboard flows over RFB CutText in both directions.
+		"disable-copy":  "false",
+		"disable-paste": "false",
+	}
+	if w, err := strconv.Atoi(width); err == nil && w > 0 {
+		config.OptimalScreenWidth = w
+	}
+	if h, err := strconv.Atoi(height); err == nil && h > 0 {
+		config.OptimalScreenHeight = h
+	}
+
+	// Recording is not best-effort here the way it is for RDP: the whole
+	// justification for letting an admin onto someone's live desktop is that
+	// there is a record of what they did. It is still not allowed to FAIL the
+	// connection, but keys are captured too.
+	if m.recordingEnabled {
+		config.Parameters["recording-path"] = m.recordingDir
+		config.Parameters["recording-name"] = t.sessionID
+		config.Parameters["create-recording-path"] = "true"
+		config.Parameters["recording-include-keys"] = "true"
+	}
+
+	addr, err := net.ResolveTCPAddr("tcp", m.guacdAddr)
+	if err != nil {
+		t.close()
+		return nil, fmt.Errorf("resolve guacd addr: %w", err)
+	}
+	conn, err := net.DialTCP("tcp", nil, addr)
+	if err != nil {
+		t.close()
+		return nil, fmt.Errorf("dial guacd (is the guacd container running?): %w", err)
+	}
+
+	stream := guac.NewStream(conn, guac.SocketTimeout)
+	if err := stream.Handshake(config); err != nil {
+		_ = conn.Close()
+		t.close()
+		return nil, fmt.Errorf("guacd handshake: %w", err)
+	}
+
+	m.logger.Info("Remote-control tunnel established",
+		zap.String("agent_id", agentID),
+		zap.String("session", t.sessionID),
+		zap.Int("agent_port", remotePort),
+		zap.Int("bridge_port", t.port()))
+	return guac.NewSimpleTunnel(stream), nil
+}
+
+// recordingKey builds the S3 object key for a session recording:
+//
+//	<organisation>/<group>/<machine>/<user>/<session>/desktop.guac
+//
+// Every segment is sanitised: these values come from user-chosen names, and an
+// empty or slash-bearing one would either collapse the path or silently write
+// the recording somewhere other than intended.
+func recordingKey(machine *store.Machine, username, sessionID string) string {
+	org := machine.OrgID
+	if org == "" {
+		// Machines registered before organisations existed carry only a tenant.
+		org = machine.TenantID
+	}
+
+	// A machine can belong to several groups; the recording has to land in one
+	// place, so the first is used and the rest are reachable through the
+	// machine's own recordings list.
+	group := "ungrouped"
+	if len(machine.GroupIDs) > 0 && machine.GroupIDs[0] != "" {
+		group = machine.GroupIDs[0]
+	}
+
+	return strings.Join([]string{
+		keySegment(org, "unknown-org"),
+		keySegment(group, "ungrouped"),
+		keySegment(machine.Name, machine.AgentID),
+		keySegment(username, "unknown-user"),
+		keySegment(sessionID, "unknown-session"),
+		"desktop.guac",
+	}, "/")
+}
+
+// keySegment makes one value safe to use as a single path segment, falling back
+// when it is empty or sanitises away to nothing.
+func keySegment(v, fallback string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '-', r == '_', r == '.':
+			return r
+		// Anything else — slashes, spaces, punctuation — becomes a hyphen so a
+		// machine called "Kaal's Laptop" cannot introduce a path separator.
+		default:
+			return '-'
+		}
+	}, strings.TrimSpace(v))
+
+	// Collapse dot runs. A single dot is fine in a name, but ".." reads as a
+	// traversal to anything that later treats this key as a filesystem path —
+	// which is exactly what happens when a recording is downloaded.
+	for strings.Contains(cleaned, "..") {
+		cleaned = strings.ReplaceAll(cleaned, "..", ".")
+	}
+
+	cleaned = strings.Trim(cleaned, "-.")
+	if cleaned != "" {
+		return cleaned
+	}
+
+	// The fallback gets the same treatment, and must itself never be empty:
+	// an empty segment collapses the path and puts the recording somewhere the
+	// portal will not look for it.
+	if fallback != "" && fallback != v {
+		return keySegment(fallback, "")
+	}
+	return "unknown"
 }
 
 // RDPWebSocket is the browser-facing endpoint. guacamole-common-js connects here;
@@ -658,8 +821,8 @@ func (h *Handler) RDPFile(c *gin.Context) {
 	}
 	b.WriteString("prompt for credentials:i:1\r\n")
 	b.WriteString("authentication level:i:0\r\n") // don't block on self-signed cert
-	b.WriteString("enablecredsspsupport:i:0\r\n")  // NLA disabled server-side
-	b.WriteString("screen mode id:i:2\r\n")        // full screen
+	b.WriteString("enablecredsspsupport:i:0\r\n") // NLA disabled server-side
+	b.WriteString("screen mode id:i:2\r\n")       // full screen
 	b.WriteString("redirectclipboard:i:1\r\n")
 	b.WriteString("audiomode:i:0\r\n")
 

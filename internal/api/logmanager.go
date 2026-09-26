@@ -15,11 +15,11 @@ import (
 // ── Request/Response types ────────────────────────────────────────────────────
 
 type logMgmtConfigRequest struct {
-	RetentionDays   int    `json:"retention_days"`
-	ArchiveEnabled  bool   `json:"archive_enabled"`
-	ArchiveEveryDays int   `json:"archive_every_days"`
-	StorageType     string `json:"storage_type"`
-	StorageCreds    any    `json:"storage_creds,omitempty"` // raw creds (never returned)
+	RetentionDays    int    `json:"retention_days"`
+	ArchiveEnabled   bool   `json:"archive_enabled"`
+	ArchiveEveryDays int    `json:"archive_every_days"`
+	StorageType      string `json:"storage_type"`
+	StorageCreds     any    `json:"storage_creds,omitempty"` // raw creds (never returned)
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
@@ -59,13 +59,13 @@ func (h *Handler) GetLogManagementConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"retention_days":    cfg.RetentionDays,
-		"archive_enabled":   cfg.ArchiveEnabled,
+		"retention_days":     cfg.RetentionDays,
+		"archive_enabled":    cfg.ArchiveEnabled,
 		"archive_every_days": cfg.ArchiveEveryDays,
-		"storage_type":      cfg.StorageType,
+		"storage_type":       cfg.StorageType,
 		"storage_configured": len(cfg.StorageCredsEnc) > 0,
-		"last_archive_at":   cfg.LastArchiveAt,
-		"next_archive_at":   cfg.NextArchiveAt,
+		"last_archive_at":    cfg.LastArchiveAt,
+		"next_archive_at":    cfg.NextArchiveAt,
 	})
 }
 

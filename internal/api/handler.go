@@ -22,6 +22,7 @@ type Handler struct {
 	terminalManager *TerminalManager
 	uploadService   *upload.Service
 	rdpManager      *RDPManager
+	remoteControl   *RemoteControlManager
 	logger          *zap.Logger
 }
 
@@ -41,6 +42,17 @@ func (h *Handler) GetTerminalManager() *TerminalManager {
 }
 
 // SetRDPManager wires the RDP tunnel manager (remote-desktop feature).
+// SetRemoteControlManager wires the AnyDesk-style live-session manager.
+func (h *Handler) SetRemoteControlManager(rc *RemoteControlManager) {
+	h.remoteControl = rc
+}
+
+// GetRemoteControlManager exposes the manager so main.go can route the agent's
+// rc_ replies to it.
+func (h *Handler) GetRemoteControlManager() *RemoteControlManager {
+	return h.remoteControl
+}
+
 func (h *Handler) SetRDPManager(rm *RDPManager) {
 	h.rdpManager = rm
 }
@@ -744,7 +756,7 @@ func (h *Handler) GetMachineAccessUsers(c *gin.Context) {
 		// Only username is stored in allowed_users list
 		accessUsers = append(accessUsers, AccessUser{
 			Username:  username,
-			Email:     "", // Not available without vsay-auth lookup
+			Email:     "",         // Not available without vsay-auth lookup
 			GrantedAt: time.Now(), // TODO: Store grant timestamp
 		})
 	}

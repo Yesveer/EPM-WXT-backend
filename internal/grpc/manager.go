@@ -40,9 +40,9 @@ type CommandMetadata struct {
 }
 
 type AgentManager struct {
-	mu               sync.RWMutex
-	connections      map[string]*AgentConnection
-	commandMetadata  map[string]*CommandMetadata // Track command metadata by commandID
+	mu              sync.RWMutex
+	connections     map[string]*AgentConnection
+	commandMetadata map[string]*CommandMetadata // Track command metadata by commandID
 }
 
 func NewAgentManager() *AgentManager {
@@ -58,10 +58,10 @@ func (m *AgentManager) AddConnection(agentID string, stream agentv1.AgentService
 
 	ctx, cancel := context.WithCancel(stream.Context())
 	conn := &AgentConnection{
-		AgentID:   agentID,
-		Stream:    stream,
-		LastSeen:  time.Now(),
-		Ctx:       ctx,
+		AgentID:     agentID,
+		Stream:      stream,
+		LastSeen:    time.Now(),
+		Ctx:         ctx,
 		Cancel:      cancel,
 		InputChan:   make(chan *agentv1.ServerMessage, 100),
 		DesktopChan: make(chan *agentv1.ServerMessage, 2048),

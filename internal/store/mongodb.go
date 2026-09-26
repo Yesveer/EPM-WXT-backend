@@ -12,20 +12,20 @@ import (
 )
 
 type MongoDB struct {
-	client              *mongo.Client
-	db                  *mongo.Database
-	Machines            *mongo.Collection
-	Logs                *mongo.Collection
-	Sessions            *mongo.Collection
-	Issues              *mongo.Collection
-	Fixes               *mongo.Collection
-	TenantConfigs       *mongo.Collection
-	Recordings          *mongo.Collection
-	LogManagementConfs  *mongo.Collection
-	ArchiveRuns         *mongo.Collection
-	AuditLogs           *mongo.Collection
-	AccessRequests      *mongo.Collection
-	AccessEvents        *mongo.Collection
+	client             *mongo.Client
+	db                 *mongo.Database
+	Machines           *mongo.Collection
+	Logs               *mongo.Collection
+	Sessions           *mongo.Collection
+	Issues             *mongo.Collection
+	Fixes              *mongo.Collection
+	TenantConfigs      *mongo.Collection
+	Recordings         *mongo.Collection
+	LogManagementConfs *mongo.Collection
+	ArchiveRuns        *mongo.Collection
+	AuditLogs          *mongo.Collection
+	AccessRequests     *mongo.Collection
+	AccessEvents       *mongo.Collection
 }
 
 func NewMongoDB(uri, dbName string) (*MongoDB, error) {
@@ -1646,6 +1646,108 @@ func (m *MongoDB) CreateAccessEvent(ev *AccessEvent) error {
 	}
 	ev.ID = result.InsertedID.(primitive.ObjectID)
 	return nil
+}
+
+// HasActiveAccessEvent reports whether a session is already recorded as open
+// for this dedup key.
+//
+// The agent re-reports every existing session whenever it starts — its
+// in-memory view of what it has already told us does not survive a restart —
+// so inserting blindly produced one duplicate row per restart for the same
+// unchanged login.
+func (m *MongoDB) HasActiveAccessEvent(agentID, osUser, line string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	n, err := m.AccessEvents.CountDocuments(ctx, bson.M{
+		"agent_id": agentID,
+		"os_user":  osUser,
+		"line":     line,
+		"active":   true,
+	}, options.Count().SetLimit(1))
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// DedupeActiveAccessEvents collapses repeated open rows for the same session,
+// keeping the earliest and closing the rest.
+//
+// Before the backend deduplicated on insert, every agent restart added another
+// open row for each unchanged login — a machine restarted three times showed
+// the same person connected three times. Reconciling on its own would keep all
+// of them, since each one matches a session that really is open, so the extras
+// have to be collapsed explicitly.
+func (m *MongoDB) DedupeActiveAccessEvents(agentID string, at time.Time) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Oldest first, so the row kept is the one with the original login time.
+	cur, err := m.AccessEvents.Find(ctx,
+		bson.M{"agent_id": agentID, "active": true},
+		options.Find().SetSort(bson.D{{Key: "login_at", Value: 1}}))
+	if err != nil {
+		return 0, err
+	}
+	defer cur.Close(ctx)
+
+	seen := map[string]bool{}
+	var extras []primitive.ObjectID
+	for cur.Next(ctx) {
+		var ev AccessEvent
+		if err := cur.Decode(&ev); err != nil {
+			continue
+		}
+		key := ev.OSUser + "\x00" + ev.Line
+		if seen[key] {
+			extras = append(extras, ev.ID)
+			continue
+		}
+		seen[key] = true
+	}
+	if err := cur.Err(); err != nil {
+		return 0, err
+	}
+	if len(extras) == 0 {
+		return 0, nil
+	}
+
+	res, err := m.AccessEvents.UpdateMany(ctx,
+		bson.M{"_id": bson.M{"$in": extras}},
+		bson.M{"$set": bson.M{"active": false, "logout_at": at}})
+	if err != nil {
+		return 0, err
+	}
+	return res.ModifiedCount, nil
+}
+
+// CloseStaleAccessEvents marks every still-open session for this agent as
+// logged out unless its key appears in keep.
+//
+// Sessions that end while the agent is stopped are never reported as logouts —
+// nothing observes them ending — so without this they stay "active" forever
+// and the portal shows people logged in who left days ago.
+func (m *MongoDB) CloseStaleAccessEvents(agentID string, keep []AccessEventKey, at time.Time) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	filter := bson.M{"agent_id": agentID, "active": true}
+	if len(keep) > 0 {
+		pairs := make([]bson.M, 0, len(keep))
+		for _, k := range keep {
+			pairs = append(pairs, bson.M{"os_user": k.OSUser, "line": k.Line})
+		}
+		filter["$nor"] = pairs
+	}
+
+	res, err := m.AccessEvents.UpdateMany(ctx, filter, bson.M{
+		"$set": bson.M{"active": false, "logout_at": at},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return res.ModifiedCount, nil
 }
 
 // CloseAccessEvent marks the most recent active session for (agentID, osUser, line)

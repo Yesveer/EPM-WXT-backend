@@ -23,13 +23,13 @@ func (h *Handler) GetS3Config(c *gin.Context) {
 
 	// Never expose the secret key in the response
 	resp := gin.H{
-		"enabled":            cfg.S3.Enabled,
-		"endpoint":           cfg.S3.Endpoint,
-		"protocol":           cfg.S3.Protocol,
-		"access_key":         cfg.S3.AccessKey,
-		"secret_key_set":     cfg.S3.SecretKey != "",
-		"bucket":             cfg.S3.Bucket,
-		"region":             cfg.S3.Region,
+		"enabled":        cfg.S3.Enabled,
+		"endpoint":       cfg.S3.Endpoint,
+		"protocol":       cfg.S3.Protocol,
+		"access_key":     cfg.S3.AccessKey,
+		"secret_key_set": cfg.S3.SecretKey != "",
+		"bucket":         cfg.S3.Bucket,
+		"region":         cfg.S3.Region,
 	}
 	c.JSON(http.StatusOK, resp)
 }
