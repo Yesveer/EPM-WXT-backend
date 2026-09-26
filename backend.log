@@ -1,0 +1,11 @@
+2026-02-06 14:51:27 | INFO | Cloudinary configuration found | {"url": "configured"}
+2026-02-06 14:51:28 | INFO | Connected to MongoDB
+2026-02-06 14:51:28 | INFO | Cloudinary service initialized
+2026-02-06 14:51:28 | INFO | gRPC server configured with TLS
+2026-02-06 14:51:28 | INFO | Reconciler started | {"interval": "1m0s", "offline_timeout": "2m0s"}
+2026-02-06 14:51:28 | INFO | Starting gRPC server on :8081
+2026-02-06 14:51:28 | INFO | Starting HTTP server on :8080
+2026-02-06 14:51:30 | INFO | Register request | {"token": "6985920ece87268b68f5fd6c", "hostname": "kaal"}
+2026-02-06 14:51:30 | INFO | Found pending machine, activating | {"name": "kaal", "owner_id": "69832e88af9b0e224ac80ab9"}
+2026-02-06 14:51:30 | INFO | Machine activated successfully | {"agent_id": "super-admin-6985920e", "name": "kaal"}
+2026-02-06 14:51:30 | INFO | Agent connected | {"agent_id": "super-admin-6985920e"}

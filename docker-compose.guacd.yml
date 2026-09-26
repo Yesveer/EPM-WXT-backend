@@ -1,0 +1,28 @@
+# guacd — the Guacamole proxy daemon that translates RDP/VNC/SSH into the
+# Guacamole wire protocol the browser canvas understands.
+#
+# The vsay-agent-backend connects to this on 127.0.0.1:4822 (GUACD_ADDR) and
+# tells it, per session, to open an RDP connection to a local TCP port that the
+# backend bridges through the agent tunnel to the Windows machine's port 3389.
+#
+# Run:  docker compose -f docker-compose.guacd.yml up -d
+#
+# guacd itself is stateless and needs no DB — all connection params (hostname,
+# port, username, password) are supplied at connect time by the backend.
+services:
+  guacd:
+    # 1.6.0 is multi-arch (linux/amd64 + linux/arm64), so Docker pulls the NATIVE
+    # image for the host — no qemu emulation. This is important on Apple Silicon:
+    # the emulated amd64 guacd made RDP/VNC flaky ("User is not responding").
+    image: guacamole/guacd:1.6.0
+    container_name: vsay-guacd
+    restart: unless-stopped
+    # Bind to localhost only — guacd must never be exposed publicly. The backend
+    # reaches it over the loopback interface.
+    ports:
+      - "127.0.0.1:4822:4822"
+    # guacd needs to reach the per-session RDP bridge that the backend opens on
+    # the host. host.docker.internal resolves to the host from inside the
+    # container (Docker Desktop on macOS/Windows; add extra_hosts on Linux).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

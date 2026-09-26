@@ -1,0 +1,189 @@
+package grpc
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"time"
+
+	"github.com/vsay/vsay-agent-backend/internal/store"
+	agentv1 "github.com/vsay/vsay-agent-backend/proto/agent/v1"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+type AgentServer struct {
+	agentv1.UnimplementedAgentServiceServer
+	store           store.Store
+	manager         *AgentManager
+	logger          *zap.Logger
+	terminalManager TerminalManager
+}
+
+// TerminalManager interface for forwarding terminal output
+type TerminalManager interface{
+	SendOutput(sessionID string, data []byte) error
+}
+
+func NewAgentServer(s store.Store, m *AgentManager, l *zap.Logger) *AgentServer {
+	return &AgentServer{
+		store:   s,
+		manager: m,
+		logger:  l,
+	}
+}
+
+// SetTerminalManager sets the terminal manager for forwarding output
+func (s *AgentServer) SetTerminalManager(tm TerminalManager) {
+	s.terminalManager = tm
+}
+
+func (s *AgentServer) Register(ctx context.Context, req *agentv1.RegisterRequest) (*agentv1.RegisterResponse, error) {
+	s.logger.Info("Register request", zap.String("token", req.Token), zap.String("hostname", req.Hostname))
+
+	// In a real app, validate token (user API key or similar)
+	// For now, we assume token is the User's API Key
+	user, err := s.store.GetUserByAPIKey(req.Token)
+	if err != nil {
+		s.logger.Error("Invalid token", zap.Error(err))
+		return nil, status.Error(codes.Unauthenticated, "invalid registration token")
+	}
+
+	// Generate a stable AgentID based on hostname + user
+	agentID := fmt.Sprintf("%s-%s", user.Username, req.Hostname)
+
+	// Create/Update machine in DB
+	machine := &store.Machine{
+		AgentID:       agentID,
+		Name:          req.Hostname,
+		Description:   fmt.Sprintf("%s on %s", req.OsInfo, req.IpAddress),
+		OS:            req.OsInfo,
+		IPAddress:     req.IpAddress,
+		Status:        "online",
+		LastActive:    time.Now(),
+		OwnerID:       user.ID,
+		TenantID:      user.ID.Hex(), // Simplified
+		OrgID:         "default",
+		ProjectID:     "default",
+		ResourceStats: store.ResourceStats{}, // Empty initially
+	}
+
+	if err := s.store.RegisterMachine(machine); err != nil {
+		s.logger.Error("Failed to register machine", zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to register machine")
+	}
+
+	return &agentv1.RegisterResponse{
+		AgentId:  agentID,
+		Approved: true,
+		Message:  "Registered successfully",
+		Restrictions: &agentv1.CommandRestrictions{
+			AllowedCommands:     []string{"*"},
+			SudoAllowedCommands: []string{"*"},
+		},
+	}, nil
+}
+
+func (s *AgentServer) Heartbeat(ctx context.Context, req *agentv1.HeartbeatRequest) (*agentv1.HeartbeatResponse, error) {
+	// Update machine Heartbeat
+	if req.Stats != nil {
+		stats := store.ResourceStats{
+			CPUPercent:      float64(req.Stats.CpuPercent),
+			MemoryPercent:   float64(req.Stats.MemoryPercent),
+			DiskPercent:     float64(req.Stats.DiskPercent),
+			NetworkInbound:  float64(req.Stats.NetworkInbound),
+			NetworkOutbound: float64(req.Stats.NetworkOutbound),
+		}
+		s.store.UpdateMachineStats(req.AgentId, stats)
+	}
+
+	s.store.UpdateMachineStatus(req.AgentId, "online", time.Now())
+
+	return &agentv1.HeartbeatResponse{
+		Acknowledged: true,
+	}, nil
+}
+
+func (s *AgentServer) Stream(stream agentv1.AgentService_StreamServer) error {
+	// Wait for first message to identify agent
+	firstMsg, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+
+	agentID := firstMsg.AgentId
+	if agentID == "" {
+		return status.Error(codes.InvalidArgument, "agent_id required in first message")
+	}
+
+	s.logger.Info("Agent connected", zap.String("agent_id", agentID))
+
+	conn := s.manager.AddConnection(agentID, stream)
+	defer s.manager.RemoveConnection(agentID)
+
+	s.store.UpdateMachineStatus(agentID, "online", time.Now())
+	defer s.store.UpdateMachineStatus(agentID, "offline", time.Now())
+
+	// Handle incoming messages from Agent
+	go func() {
+		for {
+			msg, err := stream.Recv()
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
+				s.logger.Error("Stream recv error", zap.Error(err))
+				return
+			}
+
+			// Process message
+			switch payload := msg.Payload.(type) {
+			case *agentv1.AgentMessage_Heartbeat:
+				// Update stats and status
+				if payload.Heartbeat.Stats != nil {
+					stats := store.ResourceStats{
+						CPUPercent:    float64(payload.Heartbeat.Stats.CpuPercent),
+						MemoryPercent: float64(payload.Heartbeat.Stats.MemoryPercent),
+						DiskPercent:   float64(payload.Heartbeat.Stats.DiskPercent),
+					}
+					s.store.UpdateMachineStats(agentID, stats)
+				}
+				s.store.UpdateMachineStatus(agentID, "online", time.Now())
+			case *agentv1.AgentMessage_CommandOutput:
+				// Log output to DB
+				s.store.CreateLog(&store.LogEntry{
+					MachineID: primitive.NewObjectID(),              // Ideally lookup ID
+					Command:   payload.CommandOutput.CommandId,      // Simplified
+					Output:    string(payload.CommandOutput.Stdout), // Simplified
+					Success:   payload.CommandOutput.ExitCode == 0,
+				})
+			case *agentv1.AgentMessage_TerminalOutput:
+				// Forward to Web via WebSocket
+				if s.terminalManager != nil {
+					if err := s.terminalManager.SendOutput(payload.TerminalOutput.SessionId, payload.TerminalOutput.Data); err != nil {
+						s.logger.Error("Failed to send terminal output to WebSocket",
+							zap.String("session_id", payload.TerminalOutput.SessionId),
+							zap.Error(err))
+					}
+				}
+				s.logger.Debug("Received terminal output",
+					zap.String("session_id", payload.TerminalOutput.SessionId),
+					zap.Int("len", len(payload.TerminalOutput.Data)))
+			}
+		}
+	}()
+
+	// Send messages FROM Server TO Agent
+	for {
+		select {
+		case msg := <-conn.InputChan:
+			if err := stream.Send(msg); err != nil {
+				return err
+			}
+		case <-stream.Context().Done():
+			return nil
+		}
+	}
+}
